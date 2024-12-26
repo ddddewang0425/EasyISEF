@@ -1,0 +1,4 @@
+best_out/mymodel/model.pth filter=lfs diff=lfs merge=lfs -text
+out/mymodel/best_model.pth filter=lfs diff=lfs merge=lfs -text
+eval/model/VisualRWKV_baseline_1b6.pth filter=lfs diff=lfs merge=lfs -text
+eval/model/VisualRWKV_baseline_3b.pth filter=lfs diff=lfs merge=lfs -text

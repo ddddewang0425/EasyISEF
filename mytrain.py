@@ -1,4 +1,5 @@
 import torch
+from datetime import timedelta
 class Args:
     def __init__(self):
         self.proj_dir = "/home/gpuadmin/Desktop/RWKV/out/modelv1"
@@ -10,7 +11,7 @@ class Args:
         self.train_epoch_steps = 20
         self.valid_epoch_steps = 10
         self.epoch_begin = 0
-        self.epoch_save = 5
+        self.epoch_save = 10
         self.micro_bsz = 8
         self.accumulate_grad_batches = 4
         self.accelerator = "gpu"
@@ -49,7 +50,7 @@ class Args:
         self.precision = "bf16"
         self.dtype = torch.bfloat16
         self.model_path = "/home/gpuadmin/Desktop/RWKV/model/VisualRWKV_baseline_3b.pth"
-        self.max_spots = 5
+        self.max_spots = 1
         
         # 비전 모델 설정
         self.vision_tower_name = "/home/gpuadmin/Desktop/RWKV/myclip"
@@ -97,7 +98,7 @@ deepspeed_config["optimizer"]["params"]["weight_decay"] = args.weight_decay
 deepspeed_config["scheduler"]["params"]["warmup_min_lr"] = args.lr_init
 deepspeed_config["scheduler"]["params"]["warmup_max_lr"] = args.lr_final
 deepspeed_config["scheduler"]["params"]["warmup_num_steps"] = args.warmup_steps
-print(deepspeed_config)
+# print(deepspeed_config)
 np.set_printoptions(precision=4, suppress=True, linewidth=200)
 warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
 warnings.filterwarnings("ignore", ".*The progress bar already tracks a metric with the*")
@@ -177,6 +178,7 @@ optimizer = DeepSpeedCPUAdam(
     weight_decay=args.weight_decay
 )
 
+torch.distributed.init_process_group(backend='nccl', timeout=timedelta(hours=24))
 model_engine, optimizer, _, _ = deepspeed.initialize(
     model=model,
     optimizer=optimizer,
@@ -189,7 +191,7 @@ deepspeed_config["zero_optimization"]["reduce_bucket_size"] = args.ds_bucket_mb 
 # print(model_engine.global_rank)
 # must set shuffle=False, persistent_workers=False (because worker is in another thread)
 device = model_engine.local_rank if hasattr(model_engine, 'local_rank') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"device : {device} / global_rank : {model_engine.global_rank}")
+# print(f"device : {device} / global_rank : {model_engine.global_rank}")
 from src.dataset import IGNORE_INDEX, IMAGE_TOKEN_INDEX, STOP_TOKEN_INDEX
 import multiprocessing
 args.global_rank = model_engine.global_rank
@@ -364,7 +366,7 @@ for epoch in range(args.epoch_begin, args.max_epochs):
     
     print(", ".join([f"{k} : {sum(v)/len(v)}s" for k,v in time_logs.items()]))
 
-    deepspeed.comm.barrier()
+    deepspeed.comm.barrier(device_ids=[0,1,2,3])
 
     train_loss = train_loss / len(train_loader)
     train_accuracy = train_accuracy / len(train_loader)
@@ -373,7 +375,6 @@ for epoch in range(args.epoch_begin, args.max_epochs):
     val_loss, val_accuracy = validate(model_engine, val_loader, device)
 
      # History 저장
-    print(f"train_loss of {deepspeed.comm.get_rank()} : {train_loss}")
     if torch.distributed.is_initialized():
         # 모든 GPU에서 loss/accuracy 값을 모은 후, 평균화
         # 필요하다면 all_reduce를 통해 평균화할 수 있음.
@@ -391,8 +392,6 @@ for epoch in range(args.epoch_begin, args.max_epochs):
         train_accuracy = train_accuracy_tensor.item() / torch.distributed.get_world_size()
         val_accuracy = val_accuracy_tensor.item() / torch.distributed.get_world_size()
         pass
-    print(f"average train_loss : {train_loss}")
-    # 매 epoch마다 history 저장
     if deepspeed.comm.get_rank() == 0:
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
@@ -405,14 +404,19 @@ for epoch in range(args.epoch_begin, args.max_epochs):
         print(f"  Valid Loss: {val_loss:.4f} | Valid Accuracy: {val_accuracy:.4f}")
         if args.epoch_save != 0 and epoch % args.epoch_save == 0:
             checkpoint_tag = f"epoch_{epoch}"
-            model_engine.save_checkpoint(save_dir="/home/gpuadmin/Desktop/RWKV/checkpoints", tag=checkpoint_tag)
+            start_time=time.time()
+            print("model auto saving... ",end='')
+            model_engine.save_checkpoint(save_dir="/home/gpuadmin/Desktop/RWKV/checkpoints", tag=checkpoint_tag,)
+            print(f"complete! in {time.time()-start_time}s")
 
         
     if val_loss < best_val_loss:
         if deepspeed.comm.get_rank() == 0:
             # best model 저장
             checkpoint_tag = f"best"
-            model_engine.save_checkpoint(save_dir="checkpoints/", tag=checkpoint_tag)
+            print("Best Model! Saving...",end='')
+            model_engine.save_checkpoint(save_dir="/home/gpuadmin/Desktop/RWKV/checkpoints", tag=checkpoint_tag)
+            print(f"complete! in {time.time()-start_time}s")
             print(f"Best model updated at epoch {epoch+1} with val_loss {val_loss:.4f} (decreases by {best_val_loss - val_loss})")
         best_val_loss = val_loss
 

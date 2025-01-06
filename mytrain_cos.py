@@ -2,7 +2,7 @@ import torch
 from datetime import timedelta
 class Args:
     def __init__(self):
-        self.name = "spot10"
+        self.name = "sum_spot3"
         self.proj_dir = f"/home/gpuadmin/Desktop/RWKV/out/{self.name}"
         self.train_data_file = "/home/gpuadmin/Desktop/RWKV/data/train_blip_laion_cc_sbu_558k.json"
         self.valid_data_file = "/home/gpuadmin/Desktop/RWKV/data/val_blip_laion_cc_sbu_558k.json"
@@ -51,7 +51,7 @@ class Args:
         self.precision = "bf16"
         self.dtype = torch.bfloat16
         #self.model_path = "/home/gpuadmin/Desktop/RWKV/model/VisualRWKV_baseline_3b.pth"
-        self.load_checkpoint_dir = f"/home/gpuadmin/Desktop/RWKV/checkpoints/spot5"
+        self.load_checkpoint_dir = f"/home/gpuadmin/Desktop/RWKV/checkpoints/spot3"
         self.save_checkpoint_dir = f"/home/gpuadmin/Desktop/RWKV/checkpoints/{self.name}"
         self.max_spots = 10
         
@@ -341,7 +341,7 @@ for epoch in range(args.epoch_begin, args.max_epochs):
     start_time = time.time()
     for step, batch in progress_bar:
         time_logs["data_loading"].append(time.time()-start_time);start_time=time.time()
-        logits, targets = model_engine(move_to_device(batch, device))
+        logits, targets, locs = model_engine(move_to_device(batch, device))
         time_logs["inference"].append(time.time()-start_time);start_time=time.time()
 
 

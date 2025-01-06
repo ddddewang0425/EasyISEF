@@ -367,7 +367,7 @@ class RWKV_II(pl.LightningModule):
         # bidirectional
         if (samples['input_ids']==IMAGE_TOKEN_INDEX).any():
             print("FUCK")
-        logits = self.forward_without_last_image(
+        logits, locs = self.forward_without_last_image(
             input_ids = samples['input_ids'], 
             images = samples['images'],
             real_images = samples['real_images'],
@@ -378,7 +378,7 @@ class RWKV_II(pl.LightningModule):
             max_new_tokens = self.args.max_new_tokens,
             stop_token_idx = STOP_TOKEN_INDEX,
             )
-        return logits, targets
+        return logits, targets, locs
 
     def bidirectional_forward(self, x, x_emb=None, state=None):
         args = self.args
@@ -715,6 +715,7 @@ class RWKV_II(pl.LightningModule):
         generated_token_logits = []
         generated_token_probs = []
         logits = None
+        locs = []
         for i in range(max_spots):
             if i==0:
                 FirstInput = torch.cat((torch.tensor([IMAGE_TOKEN_INDEX]).repeat(input_ids.shape[0], 1).to(input_ids.device), self.firstInput[0].to(input_ids.device).repeat(input_ids.shape[0], 1), input_ids, self.firstInput[1].to(input_ids.device).repeat(input_ids.shape[0], 1)),dim=1)
@@ -722,6 +723,7 @@ class RWKV_II(pl.LightningModule):
                 x,_,_ = self.preparing_embedding(sampels, truncate=False)
             else:
                 loc = torch.sigmoid(self.emb_spot(logits))
+                locs.append(loc)
                 print(loc)
                 spot = self.extract_spot(real_images, loc, 112)
                 spot_tensor = self.image_processor.preprocess(spot, return_tensors='pt', do_rescale=False)['pixel_values'].to(images.dtype).to(input_ids.device).unsqueeze(1)
@@ -734,6 +736,7 @@ class RWKV_II(pl.LightningModule):
             # if torch.argmax(logits, dim=-1, keepdim=True).item() == IMAGE_TOKEN_INDEX:
             #    break
         loc = torch.sigmoid(self.emb_spot(logits))
+        locs.append(loc)
         spot = self.extract_spot(real_images, loc, 112)
         spot_tensor = self.image_processor.preprocess(spot, return_tensors='pt', do_rescale=False)['pixel_values'].to(images.dtype).to(input_ids.device).unsqueeze(1) 
         Second_Third_Input = torch.cat((self.secondInput[0].to(input_ids.device).repeat(input_ids.shape[0], 1), torch.tensor([IMAGE_TOKEN_INDEX]).to(input_ids.device).repeat(input_ids.shape[0], 1)), dim=1)
@@ -749,7 +752,7 @@ class RWKV_II(pl.LightningModule):
         logits = logits[:,-input_ids.shape[1]:,:]
         tokens = torch.argmax(logits, dim=-1, keepdim=True)
         tokens_logits = logits.gather(-1,tokens).squeeze(-1)
-        return logits
+        return logits, locs.stack(0)
 
 if __name__ == "__main__":
     B, T, C, H = 2, 4, 8, 2

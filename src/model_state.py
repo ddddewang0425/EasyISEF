@@ -60,7 +60,6 @@ class WKV_6STATE(torch.autograd.Function):
             assert s.is_contiguous()
             ctx.save_for_backward(r, k, v, w, u, s)
             y = torch.empty((B, T, C), device=r.device, dtype=r.dtype, memory_format=torch.contiguous_format).uniform_(-100, 100)
-            print(r.dtype,k.dtype,v.dtype,w.dtype,u.dtype,s.dtype)
             wkv6state_cuda.forward(B, T, C, H, r, k, v, w, u, s, y)
             return y
 

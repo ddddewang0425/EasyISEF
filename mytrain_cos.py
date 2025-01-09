@@ -4,9 +4,8 @@ class Args:
     def __init__(self):
         self.name = "sum_spot3"
         self.proj_dir = f"/home/gpuadmin/Desktop/RWKV/out/{self.name}"
-        self.train_data_file = "/home/gpuadmin/Desktop/RWKV/data/train_blip_laion_cc_sbu_558k.json"
-        self.valid_data_file = "/home/gpuadmin/Desktop/RWKV/data/val_blip_laion_cc_sbu_558k.json"
-        self.test_data_file = "/home/gpuadmin/Desktop/RWKV/data/test_blip_laion_cc_sbu_558k.json"
+        self.train_data_file = "/home/gpuadmin/Desktop/RWKV/llavacosdataset/train_cos.json"
+        self.valid_data_file = "/home/gpuadmin/Desktop/RWKV/llavacosdataset/valid_cos.json"
         self.data_type = "json"
         self.max_epochs = 1000
         self.train_epoch_steps = 20
@@ -50,10 +49,11 @@ class Args:
         self.freeze_proj = 0
         self.precision = "bf16"
         self.dtype = torch.bfloat16
-        #self.model_path = "/home/gpuadmin/Desktop/RWKV/model/VisualRWKV_baseline_3b.pth"
+        self.model_path = "/home/gpuadmin/Desktop/RWKV/model/VisualRWKV_baseline_3b.pth"
         self.load_checkpoint_dir = f"/home/gpuadmin/Desktop/RWKV/checkpoints/spot3"
+        self.loadormodel = "model"
         self.save_checkpoint_dir = f"/home/gpuadmin/Desktop/RWKV/checkpoints/{self.name}"
-        self.max_spots = 10
+        self.max_spots = 3
         
         # 비전 모델 설정
         self.vision_tower_name = "/home/gpuadmin/Desktop/RWKV/myclip"
@@ -63,7 +63,7 @@ class Args:
 
         self.random_seed = 235
 
-        self.image_folder = "/home/gpuadmin/Desktop/RWKV/images"
+        self.image_folder = "/home/gpuadmin/Desktop/RWKV/llavacosdataset"
         self.temperature = None
         self.top_p = None
         self.max_new_tokens = 128
@@ -72,6 +72,10 @@ class Args:
         self.dataset_name = "default"
         self.image_position = "no"
         self.num_nodes = 1
+
+        self.delta = 20
+        self.answer_loss = 1.0
+        self.spot_loss = 50.0
 args = Args()
 
 import os, warnings, math, datetime, sys, time, json
@@ -152,8 +156,7 @@ else:
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
-from src.trainer import train_callback
-from src.dataset import MyDataset
+from src.dataset_llavacos import MyDataset
 from src.rwkv_tokenizer import TRIE_TOKENIZER
 from transformers import AutoImageProcessor
 
@@ -161,14 +164,14 @@ args.tokenizer = TRIE_TOKENIZER("src/rwkv_vocab_v20230424.txt")
 args.image_processor = AutoImageProcessor.from_pretrained(args.vision_tower_name)
 
 
-from src.model_state_torch import RWKV_II
+from src.model_state_torch_spot import RWKV_II
 # 256gb cpu memory is not enough for 8 gpus
 # to use 6 gpus on 256gb cpu memory, use .half() to save memory
 model = RWKV_II(args).to(args.dtype)
 
-# if args.model_path:
-#     msg = model.load_state_dict(torch.load(args.model_path, map_location='cpu'), strict=False)
-#     model = model.to(args.dtype)
+if args.loadormodel == "model":
+    msg = model.load_state_dict(torch.load(args.model_path, map_location='cpu'), strict=False)
+    model = model.to(args.dtype)
 if args.freeze_rwkv > 0:
     model.freeze_rwkv(args.freeze_rwkv)
 if args.freeze_proj > 0:
@@ -189,8 +192,9 @@ model_engine, optimizer, _, _ = deepspeed.initialize(
     optimizer=optimizer,
     config=deepspeed_config
 )
-load_successful, client_state = model_engine.load_checkpoint(args.load_checkpoint_dir, "best_val")
-assert load_successful, "best_val load failure"
+if args.loadormodel == "load":
+    load_successful, client_state = model_engine.load_checkpoint(args.load_checkpoint_dir, "best_val")
+    assert load_successful, "best_val load failure"
 deepspeed_config["zero_optimization"]["allgather_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
 deepspeed_config["zero_optimization"]["reduce_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
 # print(deepspeed_config)
@@ -199,14 +203,18 @@ deepspeed_config["zero_optimization"]["reduce_bucket_size"] = args.ds_bucket_mb 
 # must set shuffle=False, persistent_workers=False (because worker is in another thread)
 device = model_engine.local_rank if hasattr(model_engine, 'local_rank') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # print(f"device : {device} / global_rank : {model_engine.global_rank}")
-from src.dataset import IGNORE_INDEX, IMAGE_TOKEN_INDEX, STOP_TOKEN_INDEX
+from src.dataset_llavacos import IGNORE_INDEX, IMAGE_TOKEN_INDEX, STOP_TOKEN_INDEX
 import multiprocessing
 args.global_rank = model_engine.global_rank
 # dataset
-my_epoch = multiprocessing.Value('i',client_state["epoch"])
-args.epoch_begin = client_state["epoch"]
-train_dataset = MyDataset(args,args.train_data_file, my_epoch, args.train_epoch_steps)
-valid_dataset = MyDataset(args,args.valid_data_file, my_epoch, args.valid_epoch_steps)
+if args.loadormodel=="load":
+    my_epoch = multiprocessing.Value('i',client_state["epoch"])
+    args.epoch_begin = client_state["epoch"]
+else:
+    my_epoch = multiprocessing.Value('i', 0)
+    args.epoch_begin = 0
+train_dataset = MyDataset(args, my_epoch, args.train_epoch_steps, cospath=args.train_data_file)
+valid_dataset = MyDataset(args, my_epoch, args.valid_epoch_steps, cospath=args.valid_data_file)
 args.vocab_size = train_dataset.vocab_size
 
 def custom_collate_fn(batch):
@@ -217,6 +225,7 @@ def custom_collate_fn(batch):
     batch["input_ids"] = torch.stack(batch["input_ids"])
     batch["labels"] = torch.stack(batch["labels"]).to(args.dtype)
     batch["images"] = torch.stack(batch["images"]).to(args.dtype)
+    batch["locs"] = torch.tensor(batch["locs"]).to(args.dtype)
     # for i,x in enumerate(batch["real_images"]):
     #     batch["real_images"][i]=x.to(args.dtype)
     del batch["input_text"]
@@ -260,11 +269,57 @@ history = {
     "train_loss": [],
     "val_loss": [],
     "train_accuracy": [],
-    "val_accuracy": []
+    "val_accuracy": [],
+    "train_iou": [],
+    "val_iou": []
 }
 best_val_loss = float('inf')
 best_model_path = os.path.join(args.proj_dir, "best_model.pth")
 history_path = os.path.join(args.proj_dir, "history.json")
+
+def calculate_iou(pred_boxes, label_boxes):
+    """
+    Calculate IoU for batched ROI data.
+
+    Args:
+        pred_boxes (torch.Tensor): Predicted bounding boxes, shape (B, 3) where 3 = [x, y, w].
+        label_boxes (torch.Tensor): Ground truth bounding boxes, shape (B, 3) where 3 = [x, y, w].
+
+    Returns:
+        torch.Tensor: IoU values for each box in the batch, shape (B,).
+    """
+    # Extract coordinates for predicted boxes
+    pred_x1 = pred_boxes[:, 0]
+    pred_y1 = pred_boxes[:, 1]
+    pred_x2 = pred_boxes[:, 0] + pred_boxes[:, 2]
+    pred_y2 = pred_boxes[:, 1] + pred_boxes[:, 2]
+
+    # Extract coordinates for label boxes
+    label_x1 = label_boxes[:, 0]
+    label_y1 = label_boxes[:, 1]
+    label_x2 = label_boxes[:, 0] + label_boxes[:, 2]
+    label_y2 = label_boxes[:, 1] + label_boxes[:, 2]
+
+    # Calculate intersection coordinates
+    inter_x1 = torch.max(pred_x1, label_x1)
+    inter_y1 = torch.max(pred_y1, label_y1)
+    inter_x2 = torch.min(pred_x2, label_x2)
+    inter_y2 = torch.min(pred_y2, label_y2)
+
+    # Calculate intersection area
+    inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+
+    # Calculate areas of predicted and label boxes
+    pred_area = (pred_x2 - pred_x1) * (pred_y2 - pred_y1)
+    label_area = (label_x2 - label_x1) * (label_y2 - label_y1)
+
+    # Calculate union area
+    union_area = pred_area + label_area - inter_area
+
+    # Calculate IoU
+    iou = inter_area / torch.clamp(union_area, min=1e-6)
+
+    return iou.mean()
 
 def calculate_accuracy(logits, labels):
     # logits: [batch, seq_len, vocab_size]
@@ -288,6 +343,7 @@ def validate(model_engine, val_loader, device):
     model_engine.eval()
     total_loss = 0.0
     total_accuracy = 0.0
+    total_iou = 0.0
     IGNORE_INDEX = -100
     start_time = 0
     end_time = 0
@@ -298,7 +354,8 @@ def validate(model_engine, val_loader, device):
             progressbar = enumerate(val_loader)
         for step, batch in progressbar:
             batch = move_to_device(batch, device)
-            logits, targets = model_engine(batch)
+            logits, targets, locs = model_engine(batch)
+            locs = locs.to(device)
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = targets[..., 1:].contiguous()
 
@@ -311,19 +368,28 @@ def validate(model_engine, val_loader, device):
                 ignore_index=IGNORE_INDEX,
                 reduction='none'
             ).to(args.dtype)
+            loc_loss = F.huber_loss(
+                locs[0].to(torch.float32),
+                batch["locs"].to(torch.float32),
+                delta=args.delta,
+                reduction='mean'
+            ).to(args.dtype)
 
             loss = loss.view(shift_labels.size()).sum(1)/valid_lengths
             loss = loss.mean()
 
             # accuracy 계산
             accuracy = calculate_accuracy(shift_logits, shift_labels)
+            iou = calculate_iou(locs[0].to(torch.float32), batch["locs"].to(torch.float32))
 
-            total_loss += loss.item()
+            total_loss += loss.item() + loc_loss.item()
             total_accuracy += accuracy
+            total_iou += iou
 
     avg_loss = total_loss / len(val_loader)
+    avg_iou = total_iou / len(val_loader)
     avg_accuracy = total_accuracy / len(val_loader)
-    return avg_loss, avg_accuracy
+    return avg_loss, avg_accuracy, avg_iou
 
 # 메인 학습 루프
 for epoch in range(args.epoch_begin, args.max_epochs):
@@ -332,6 +398,7 @@ for epoch in range(args.epoch_begin, args.max_epochs):
 
     train_loss = 0.0
     train_accuracy = 0.0
+    train_iou = 0.0
     IGNORE_INDEX = -100
     time_logs = {"data_loading" : [], "inference" : [], "loss_accuracy" : [], "step" : []}
     if deepspeed.comm.get_rank() == 0:
@@ -344,7 +411,7 @@ for epoch in range(args.epoch_begin, args.max_epochs):
         logits, targets, locs = model_engine(move_to_device(batch, device))
         time_logs["inference"].append(time.time()-start_time);start_time=time.time()
 
-
+        locs = locs.to(device)
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = targets[..., 1:].contiguous()
         
@@ -360,14 +427,22 @@ for epoch in range(args.epoch_begin, args.max_epochs):
             ignore_index=IGNORE_INDEX,
             reduction='none'
         ).to(args.dtype)
+        loc_loss = F.huber_loss(
+            input=locs[0].to(torch.float32),
+            target=batch["locs"].to(torch.float32),
+            delta=args.delta,
+            reduction="mean"
+        ).to(args.dtype)
         loss = loss.view(shift_labels.size()).sum(1)/valid_lengths
         loss = loss.mean()
-
+        loss = loss*args.answer_loss + loc_loss*args.spot_loss
         # Accuracy 계산
         accuracy = calculate_accuracy(shift_logits, shift_labels)
+        iou = calculate_iou(locs[0].to(torch.float32), batch["locs"].to(torch.float32))
 
         train_loss += loss.item()
         train_accuracy += accuracy
+        train_iou += iou
 
         time_logs["loss_accuracy"].append(time.time()-start_time);start_time=time.time()
 
@@ -382,9 +457,10 @@ for epoch in range(args.epoch_begin, args.max_epochs):
 
     train_loss = train_loss / len(train_loader)
     train_accuracy = train_accuracy / len(train_loader)
+    train_iou = train_iou / len(train_loader)
 
     # Validation
-    val_loss, val_accuracy = validate(model_engine, val_loader, device)
+    val_loss, val_accuracy, val_iou = validate(model_engine, val_loader, device)
     deepspeed.comm.barrier(device_ids=[0,1,2,3])
 
      # History 저장
@@ -396,25 +472,33 @@ for epoch in range(args.epoch_begin, args.max_epochs):
         val_loss_tensor = torch.tensor(val_loss).to(device)
         train_accuracy_tensor = torch.tensor(train_accuracy).to(device)
         val_accuracy_tensor = torch.tensor(val_accuracy).to(device)
+        train_iou_tensor = torch.tensor(train_iou).to(device)
+        val_iou_tensor = torch.tensor(val_iou).to(device)
         torch.distributed.all_reduce(train_loss_tensor)
         torch.distributed.all_reduce(val_loss_tensor)
         torch.distributed.all_reduce(train_accuracy_tensor)
         torch.distributed.all_reduce(val_accuracy_tensor)
+        torch.distributed.all_reduce(train_iou_tensor)
+        torch.distributed.all_reduce(val_iou_tensor)
         train_loss = train_loss_tensor.item() / torch.distributed.get_world_size()
         val_loss = val_loss_tensor.item() / torch.distributed.get_world_size()
         train_accuracy = train_accuracy_tensor.item() / torch.distributed.get_world_size()
         val_accuracy = val_accuracy_tensor.item() / torch.distributed.get_world_size()
+        train_iou = train_iou_tensor.item() / torch.distributed.get_world_size()
+        val_iou = val_iou_tensor.item() / torch.distributed.get_world_size()
         pass
     if deepspeed.comm.get_rank() == 0:
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["train_accuracy"].append(train_accuracy)
         history["val_accuracy"].append(val_accuracy)
+        history["train_iou"].append(train_iou)
+        history["val_iou"].append(val_iou)
         with open(history_path, 'w') as f:
             json.dump(history, f, indent=4)
         print(f"Epoch [{epoch+1}/{args.max_epochs}] completed.")
-        print(f"  Train Loss: {train_loss:.4f} | Train Accuracy: {train_accuracy:.4f}")
-        print(f"  Valid Loss: {val_loss:.4f} | Valid Accuracy: {val_accuracy:.4f}")
+        print(f" Train Loss: {train_loss:.4f} | Train Accuracy: {train_accuracy:.4f} | Train Iou: {train_iou:.4f}")
+        print(f" Valid Loss: {val_loss:.4f} | Valid Accuracy: {val_accuracy:.4f} | Valid Iou: {val_iou:.4f}")
     if args.epoch_save != 0 and epoch % args.epoch_save == 0 and val_loss >= best_val_loss:
         if deepspeed.comm.get_rank()==0:
             start_time=time.time()

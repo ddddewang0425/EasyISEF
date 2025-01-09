@@ -172,55 +172,103 @@ images = {
         "vg/VG_100K_2":set(os.listdir("/home/gpuadmin/Desktop/RWKV/llavacosdataset/vg/VG_100K_2"))
         }
 
-querydata = json.load(open("/home/gpuadmin/Desktop/RWKV/llavacosdataset/nonocrvqa_llava_v1_5_mix665k.json"))
-querydata = {x["image"]:i for i,x in enumerate(querydata)}
+querydata = json.load(open("/home/gpuadmin/Desktop/RWKV/llavacosdataset/llava_v1_5_mix665k.json"))
+querylist = []
+for i,x in enumerate(querydata):
+    if "image" in x.keys():
+        querylist.append(x)
+print(len(querydata),len(querylist))
+querymap = {x["image"]:i for i,x in enumerate(querylist)}
 
-def whatthefuckthisdatais(x):
-    a = x[0].split("_")
+
+def whatthefuckisthisdata(x):
+    a = x["id"].split("_")
     chk = 0
     if a[1] == "VG":
-        if a[-2]+".jpg" in images["vg/VG_100K"] and len(a)-2==3 and "vg/VG_100K/"+a[-2]+".jpg" in querydata:
-            x[2] = "vg/VG_100K/"+a[-2]+".jpg"
-            x[3] = querydata[x[2]]
-            chk += 1
-        if a[-2]+".jpg" in images["vg/VG_100K_2"] and len(a)-2==4 and "vg/VG_100K_2/"+a[-2]+".jpg" in querydata:
-            x[2] = "vg/VG_100K_2/"+a[-2]+".jpg"
-            x[3] = querydata[x[2]]
-            chk += 1
+        if a[-2]+".jpg" in images["vg/VG_100K"] and len(a)-2==3:
+            try:
+                x["file_path"] = "vg/VG_100K/"+a[-2]+".jpg"
+                x["query_idx"] = querymap[x["file_path"]]
+                x["query_info"] = querydata[x["query_idx"]]
+                x["query_num"] = int(a[-1][1:])
+                chk += 1
+            except:
+                print("Key error")
+                return None
+        if a[-2]+".jpg" in images["vg/VG_100K_2"] and len(a)-2==4:
+            try:
+                x["file_path"] = "vg/VG_100K_2/"+a[-2]+".jpg"
+                x["query_idx"] = querymap[x["file_path"]]
+                x["query_info"] = querydata[x["query_idx"]]
+                x["query_num"] = int(a[-1][1:])
+                chk += 1
+            except:
+                print("Key error")
+                return None
     else:
-        if a[-2]+".jpg" in images["coco"] and "coco/train2017/"+a[-2]+".jpg" in querydata:
-            x[2] = "coco/train2017/"+a[-2]+".jpg" 
-            x[3] = querydata[x[2]]
-            chk += 1
-        if a[-2]+".jpg" in images["gqa"] and "gqa/images/"+a[-2]+".jpg" in querydata:
-            x[2] = "gqa/images/"+a[-2]+".jpg"
-            x[3] = querydata[x[2]]
-            chk += 1
-        if a[-2]+".jpg" in images["textvqa"] and "textvqa/train_images/"+a[-2]+".jpg" in querydata:
-            x[2] = "textvqa/train_images/"+a[-2]+".jpg"
-            x[3] = querydata[x[2]]
-            chk += 1
+        if a[-2]+".jpg" in images["coco/train2017"]:
+            try:
+                x["file_path"] = "coco/train2017/"+a[-2]+".jpg" 
+                x["query_idx"] = querymap[x["file_path"]]
+                x["query_info"] = querydata[x["query_idx"]]
+                x["query_num"] = int(a[-1][1:])
+                chk += 1
+            except:
+                print("Key error")
+                return None
+        if a[-2]+".jpg" in images["gqa/images"]:
+            try:    
+                x["file_path"] = "gqa/images/"+a[-2]+".jpg"
+                x["query_idx"] = querymap[x["file_path"]]
+                x["query_info"] = querydata[x["query_idx"]]
+                x["query_num"] = int(a[-1][1:])
+                chk += 1
+            except:
+                print("Key error")
+                return None
+        if a[-2]+".jpg" in images["textvqa/train_images"]:
+            try:
+                x["file_path"] = "textvqa/train_images/"+a[-2]+".jpg"
+                x["query_idx"] = querymap[x["file_path"]]
+                x["query_info"] = querydata[x["query_idx"]]
+                x["query_num"] = int(a[-1][1:])
+                chk += 1
+            except:
+                print("Key error")
+                return None
     
     if chk!=1:
+        return None
+    try:
+        if len(x["query_info"]["conversations"])<2*x["query_num"]+2:
+            #print(x["query_num"], x["query_info"])
+            return None
+        x["query_info"]["conversations"] = x["query_info"]["conversations"][2*x["query_num"]:2*x["query_num"]+2]
+        # print(x["query_info"]["conversations"], x["query_num"])
+    except:
         return None
     return x
     
 class MyDataset(Dataset):
-    def __init__(self, args, cospath, convpath, real_epoch, epoch_steps):
+    def __init__(self, args, real_epoch, epoch_steps, convpath="/home/gpuadmin/Desktop/RWKV/llavacosdataset/nonocrvqa_llava_v1_5_mix665k.json", cospath="/home/gpuadmin/Desktop/RWKV/llavacosdataset/train_cos.json"):
         self.args = args
         self.vocab_size = args.vocab_size
         self.tokenizer = args.tokenizer
 
         self.convdata = json.load(open(convpath, "r"))
         self.cosdatadict= json.load(open(cospath, "r"))
-        self.cosdata = [[v["id"], v["param"], "", -1] for k,v in self.cosdatadict]
+        self.cosdata = [{"id":v[0], "loc":v[1], "file_path":"", "query_idx":-1, "query_info":None, "query_num":-1} for v in json.load(open(cospath))] # 
         
         self.mycosdata = []
         for i,x in enumerate(self.cosdata):
-            x = whatthefuckthisdatais(x)
+            if i%10000==0:
+                print(f"{i}/{len(self.cosdata)}")
+            x = whatthefuckisthisdata(x)
             if x is not None:
                 self.mycosdata.append(x)
         print(f"{len(self.cosdata)} -> {len(self.mycosdata)} (less {len(self.cosdata)-len(self.mycosdata)})")
+        print(self.mycosdata[3])
+
 
         self.data_size = len(self.mycosdata)
         self.magic_prime = largest_3n_plus_2_prime(self.data_size)
@@ -257,7 +305,7 @@ class MyDataset(Dataset):
             x = self.mycosdata[sample_idx]
         else: # when step >= self.magic_prime, means the second epoch
             x = self.mycosdata[sample_idx]
-        sample = self.convdata[x[3]]
+        sample = x["query_info"]
         
 
         if 'image' in sample:
@@ -286,7 +334,8 @@ class MyDataset(Dataset):
         if 'image' in sample:
             data_dict['images'] = image_tensor
             # data_dict['real_images'] = self.totensor(image.resize((force_width, force_height)))
-            data_dict['real_images'] = self.totensor(image)
+            data_dict['real_images'] = self.totensor(image).to(args.dtype)
+            data_dict['locs'] = x['loc']
         else:
             # image does not exist in the data, fill with zeros
             if args.detail == 'high':
@@ -298,3 +347,10 @@ class MyDataset(Dataset):
                 data_dict['images'] = torch.zeros(1, 3, crop_size['height'], crop_size['width'])
                 data_dict['real_images'] = torch.zeros(1, 3, crop_size['height'], crop_size['width'])
         return data_dict
+if __name__=="__main__":  
+    class Args:
+        def __init__(self):
+            self.vocab_size = None
+            self.tokenizer = None
+    dataset = MyDataset(Args(), None, None)
+    print(dataset[0])

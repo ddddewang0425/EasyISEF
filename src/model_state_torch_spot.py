@@ -13,6 +13,7 @@ from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
 from pytorch_lightning.strategies import DeepSpeedStrategy
 from transformers import CLIPVisionModel, CLIPImageProcessor
 from torch.autograd import Variable
+from torchvision import transforms
 if importlib.util.find_spec('deepspeed'):
     import deepspeed
 
@@ -326,7 +327,9 @@ class RWKV_II(pl.LightningModule):
         self.image_processor = CLIPImageProcessor.from_pretrained(args.vision_tower_name)
         self.vit.requires_grad_(False)
         self.proj = nn.Linear(self.vit.config.hidden_size, args.n_embd, bias=False)
-        self.emb_spot = nn.Linear(args.vocab_size, 2)
+        self.emb_spot = nn.Linear(args.vocab_size, 3)
+        self.emb_spot.weight.data.normal_(0.0,0.2)
+        self.emb_spot.bias.data.fill_(0)
 
     def load_rwkv_from_pretrained(self, path):
         self.rwkv.load_state_dict(torch.load(path, map_location="cpu"))
@@ -522,45 +525,56 @@ class RWKV_II(pl.LightningModule):
             new_labels_padded[i, :cur_len] = cur_new_labels
         return new_input_embeds_padded, new_labels_padded, image_features
     
-    def extract_spot(self, images, loc, spot_size=336):
+    def extract_spot(self, images, loc, size):
         """
         image: [B, C, H, W] 형태의 원본 이미지
         loc: [B, 2] 형태의 상대 위치 (x, y 각각 0~1 사이 값)
         spot_size: 추출할 spot의 크기
         """
-        spots = torch.zeros(len(images), images[0].shape[0], spot_size, spot_size, device=images[0].device)
+        spots = []
+        locs = []
         for b, image in enumerate(images):
             H, W = image.shape[-2:]
-            
+            choice = max(H, W)
+            loc[b] = loc[b] * 0.95
+            loc[b, 2] = (loc[b, 2]) + 0.05
+
             # 상대 위치를 실제 픽셀 위치로 변환
             x = (loc[b, 0] * W).long()  # [B]
             y = (loc[b, 1] * H).long()  # [B]
             
-            # spot의 시작점과 끝점 계산
-            half_size = spot_size // 2
-            start_x = x - half_size
-            start_y = y - half_size
-            end_x = x + half_size
-            end_y = y + half_size
+            # # spot의 시작점과 끝점 계산
+            # half_size = spot_size // 2
+            # start_x = x - half_size
+            # start_y = y - half_size
+            # end_x = x + half_size
+            # end_y = y + half_size
+            start_x = x
+            start_y = y
+            end_x = x + (loc[b, 2]*choice).long()
+            end_y = y + (loc[b, 2]*choice).long()
             
             
             # 원본 이미지에서 실제로 가져올 영역 계산
-            valid_start_x = max(0, start_x)
-            valid_start_y = max(0, start_y)
+            valid_start_x = start_x
+            valid_start_y = start_y
             valid_end_x = min(W, end_x)
             valid_end_y = min(H, end_y)
             
             # spot에서의 대응되는 위치 계산
-            spot_start_x = max(0, -start_x)
-            spot_start_y = max(0, -start_y)
-            spot_end_x = spot_size - max(0, end_x - W)
-            spot_end_y = spot_size - max(0, end_y - H)
+            spot_start_x = 0
+            spot_start_y = 0
+            spot_end_x = valid_end_x - valid_start_x
+            spot_end_y = valid_end_y - valid_start_y
             
-            # 유효한 영역 복사
-            spots[b, :, spot_start_y:spot_end_y, spot_start_x:spot_end_x] = \
-                image[:, valid_start_y:valid_end_y, valid_start_x:valid_end_x]
+            spot = torch.zeros((image.shape[0],end_y-start_y,end_x-start_x))
+            spot[:, spot_start_y:spot_end_y, spot_start_x:spot_end_x] = image[:, valid_start_y:valid_end_y, valid_start_x:valid_end_x]
+            spot = transforms.Resize((size, size))(spot)
+            spot = spot.clamp(0.0, 1.0)
+            spots.append(spot)
+            locs.append([start_x,start_y,end_x-start_x])
             
-        return spots
+        return torch.stack(spots), torch.tensor(locs).to(loc.dtype)
 
     """
     def generate(self, input_ids, images, real_images, max_spots, num_spots, do_sample, temperature, top_p, max_new_tokens, stop_token_idx) -> list[int]:
@@ -723,10 +737,9 @@ class RWKV_II(pl.LightningModule):
                 x,_,_ = self.preparing_embedding(sampels, truncate=False)
             else:
                 loc = torch.sigmoid(self.emb_spot(logits))
+                spot, loc = self.extract_spot(real_images, loc, 336)
                 locs.append(loc)
-                print(loc)
-                spot = self.extract_spot(real_images, loc, 112)
-                spot_tensor = self.image_processor.preprocess(spot, return_tensors='pt', do_rescale=False)['pixel_values'].to(images.dtype).to(input_ids.device).unsqueeze(1)
+                spot_tensor = self.image_processor.preprocess(spot, return_tensors='pt')['pixel_values'].to(images.dtype).to(input_ids.device).unsqueeze(1)
                 # print(f"spot_tensor : {spot_tensor.dtype}")
                 SecondInput = torch.cat((self.secondInput[0].to(input_ids.device).repeat(input_ids.shape[0], 1), torch.tensor([IMAGE_TOKEN_INDEX]).to(input_ids.device).repeat(input_ids.shape[0], 1), self.secondInput[1].to(input_ids.device).repeat(input_ids.shape[0], 1)),dim=1)            
                 spot_sample = {"input_ids": SecondInput, "images": spot_tensor, "labels": torch.full_like(SecondInput, IGNORE_INDEX)}
@@ -736,9 +749,9 @@ class RWKV_II(pl.LightningModule):
             # if torch.argmax(logits, dim=-1, keepdim=True).item() == IMAGE_TOKEN_INDEX:
             #    break
         loc = torch.sigmoid(self.emb_spot(logits))
+        spot, loc = self.extract_spot(real_images, loc, 336)
         locs.append(loc)
-        spot = self.extract_spot(real_images, loc, 112)
-        spot_tensor = self.image_processor.preprocess(spot, return_tensors='pt', do_rescale=False)['pixel_values'].to(images.dtype).to(input_ids.device).unsqueeze(1) 
+        spot_tensor = self.image_processor.preprocess(spot, return_tensors='pt')['pixel_values'].to(images.dtype).to(input_ids.device).unsqueeze(1) 
         Second_Third_Input = torch.cat((self.secondInput[0].to(input_ids.device).repeat(input_ids.shape[0], 1), torch.tensor([IMAGE_TOKEN_INDEX]).to(input_ids.device).repeat(input_ids.shape[0], 1)), dim=1)
         Second_Third_sample = {"input_ids": Second_Third_Input, "images": spot_tensor, "labels": torch.full_like(Second_Third_Input, IGNORE_INDEX)}
         x,_,_ = self.preparing_embedding(Second_Third_sample, truncate=False)
@@ -752,7 +765,7 @@ class RWKV_II(pl.LightningModule):
         logits = logits[:,-input_ids.shape[1]:,:]
         tokens = torch.argmax(logits, dim=-1, keepdim=True)
         tokens_logits = logits.gather(-1,tokens).squeeze(-1)
-        return logits, locs.stack(0)
+        return logits, torch.stack(locs)
 
 if __name__ == "__main__":
     B, T, C, H = 2, 4, 8, 2

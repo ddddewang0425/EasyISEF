@@ -75,7 +75,7 @@ class Args:
 
         self.delta = 20
         self.answer_loss = 1.0
-        self.spot_loss = 50.0
+        self.spot_loss = 20.0
 args = Args()
 
 import os, warnings, math, datetime, sys, time, json

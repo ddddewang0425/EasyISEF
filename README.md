@@ -1,4 +1,4 @@
-# VisualRWKV: A Visual-Enhanced RWKV
+# Slow-Thinking VisualRWKV-3B
+Minjun Jee, Seongjun Ahn
 
-## tl;dr
-v6.0 update the model to use the RWKV-v6.0 language model.
+We introduce novel method to apply slow-thinking into recurrent sVLM.

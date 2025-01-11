@@ -1,0 +1,1 @@
+{"question_id": "1", "prompt": "User: What animal is shown in this image?\n\nAssistant:", "text": "The image shows a dog.", "avg_logit": "6.0", "avg_prob": "0.559", "model_id": "model", "metadata": {"image_file": "1.jpg"}}

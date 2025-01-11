@@ -1,0 +1,16 @@
+[
+    {
+        "id": "1",
+        "image":"1.jpg",
+        "conversations": [
+            {
+                "from": "human",
+                "value": "What animal is shown in this image?"
+            },
+            {
+                "from": "gpt",
+                "value": "The animal in the image is a raccoon."
+            }
+        ]
+    }
+]

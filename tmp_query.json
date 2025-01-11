@@ -1,0 +1,16 @@
+[
+    {
+        "id": "000080017",
+        "image":"00008/000080017.jpg",
+        "conversations": [
+            {
+                "from": "human",
+                "value": "What motif is featured on the black face mask?"
+            },
+            {
+                "from": "gpt",
+                "value": "It's decorated with a “sugar skull” motif, featuring floral and skeletal elements."
+            }
+        ]
+    }
+]
